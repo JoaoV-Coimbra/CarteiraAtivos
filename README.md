@@ -1,4 +1,4 @@
-# Projeto Arvore
+# Projeto Árvore
 
 Aplicacao React/Vite para acompanhar a vida dos ativos de uma carteira: lista de ativos, detalhe por ativo, curva de P&L, historico diario e cadastro manual ou por planilha.
 
