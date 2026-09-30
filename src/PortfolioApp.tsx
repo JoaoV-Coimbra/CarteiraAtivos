@@ -17,9 +17,17 @@ import {
   WalletCards,
 } from "lucide-react";
 
-import { PnlChart } from "./components/PnlChart";
+import { PnlChart, type BenchmarkSeries } from "./components/PnlChart";
 import { ASSETS, HISTORY, type AssetSummary, type HistoryPoint } from "./data";
 import { assetLabel, cleanText, formatDate, isOpen, money, tone } from "./lib/format";
+import {
+  ASSET_INDEXERS,
+  fetchBcbMonthlyCdi,
+  fetchIbgeMonthlyInflation,
+  type AssetIndexerKind,
+  type OfficialMonthlyCdiRate,
+  type OfficialMonthlyInflationRate,
+} from "./lib/indexers";
 import {
   detectDelimiter,
   downloadCsvFile,
@@ -35,8 +43,8 @@ const navItems = [
   { label: "Vida dos Ativos", icon: LineChart },
   { label: "Lista de Ativos", icon: Layers3 },
   { label: "Cadastro de Ativos", icon: ClipboardList },
-  { label: "Historico", icon: CalendarDays },
-  { label: "Configuracoes", icon: Settings },
+  { label: "Histórico", icon: CalendarDays },
+  { label: "Configurações", icon: Settings },
 ] as const;
 
 type NavLabel = (typeof navItems)[number]["label"];
@@ -44,6 +52,7 @@ type NavLabel = (typeof navItems)[number]["label"];
 type AssetFormState = {
   code: string;
   issuer: string;
+  indexer: AssetIndexerKind;
   appliedValue: string;
   liquidValue: string;
   date: string;
@@ -57,10 +66,18 @@ type ImportResult = {
 const EMPTY_ASSET_FORM: AssetFormState = {
   code: "",
   issuer: "",
+  indexer: "CDI",
   appliedValue: "",
   liquidValue: "",
   date: new Date().toISOString().slice(0, 10),
 };
+
+const indexerOptions = [
+  ASSET_INDEXERS.CDI,
+  ASSET_INDEXERS.IPCA,
+  ASSET_INDEXERS.INPC,
+  ASSET_INDEXERS.PREFIXED,
+] as const;
 
 function percent(value: number) {
   return `${value.toLocaleString("pt-BR", { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%`;
@@ -136,6 +153,24 @@ function parseDateInput(value: string) {
   return Number.isNaN(date.getTime()) ? null : iso;
 }
 
+function parseIndexerInput(value: string): AssetIndexerKind {
+  const normalized = normalizeHeader(value);
+
+  if (normalized === "ipca") {
+    return "IPCA";
+  }
+
+  if (normalized === "inpc") {
+    return "INPC";
+  }
+
+  if (["prefixado", "prefixada", "pre", "prefixed"].includes(normalized)) {
+    return "PREFIXED";
+  }
+
+  return "CDI";
+}
+
 function createRegisteredRow(
   values: AssetFormState,
   source: RegisteredAssetRow["source"],
@@ -149,7 +184,7 @@ function createRegisteredRow(
   if (!code || !issuer || appliedValue == null || liquidValue == null || !date) {
     return {
       row: null,
-      error: "Preencha codigo, emitente, valores validos e data.",
+      error: "Preencha código, emitente, valores válidos e data.",
     };
   }
 
@@ -158,6 +193,7 @@ function createRegisteredRow(
       id: `${code}-${date}-${crypto.randomUUID()}`,
       code,
       issuer,
+      indexer: values.indexer,
       appliedValue,
       liquidValue,
       date,
@@ -175,7 +211,7 @@ function parseAssetSpreadsheet(text: string): ImportResult {
     .filter(Boolean);
 
   if (lines.length < 2) {
-    return { rows: [], errors: ["A planilha precisa ter cabecalho e pelo menos uma linha de ativo."] };
+    return { rows: [], errors: ["A planilha precisa ter cabeçalho e pelo menos uma linha de ativo."] };
   }
 
   const delimiter = detectDelimiter(lines[0]);
@@ -183,6 +219,7 @@ function parseAssetSpreadsheet(text: string): ImportResult {
   const columnIndex = {
     code: headers.findIndex((header) => ["codigo", "cod", "code"].includes(header)),
     issuer: headers.findIndex((header) => ["emitente", "emissor", "issuer"].includes(header)),
+    indexer: headers.findIndex((header) => ["indexador", "indexer"].includes(header)),
     appliedValue: headers.findIndex((header) => ["valoraplicado", "aplicado", "valorinvestido"].includes(header)),
     liquidValue: headers.findIndex((header) => ["valorliquido", "liquido", "valoratual", "valorbruto"].includes(header)),
     date: headers.findIndex((header) => ["data", "date"].includes(header)),
@@ -195,7 +232,7 @@ function parseAssetSpreadsheet(text: string): ImportResult {
   if (missingColumns.length > 0) {
     return {
       rows: [],
-      errors: ["Use as colunas: Codigo, Emitente, Valor Aplicado, Valor Liquido, Data."],
+      errors: ["Use as colunas: Código, Emitente, Valor Aplicado, Valor Líquido, Data."],
     };
   }
 
@@ -208,6 +245,7 @@ function parseAssetSpreadsheet(text: string): ImportResult {
       {
         code: cells[columnIndex.code] || "",
         issuer: cells[columnIndex.issuer] || "",
+        indexer: parseIndexerInput(columnIndex.indexer >= 0 ? cells[columnIndex.indexer] || "" : ""),
         appliedValue: cells[columnIndex.appliedValue] || "",
         liquidValue: cells[columnIndex.liquidValue] || "",
         date: cells[columnIndex.date] || "",
@@ -261,7 +299,8 @@ function buildRegisteredPortfolio(rows: RegisteredAssetRow[]) {
       assetId,
       assetClass: "Cadastro",
       code,
-      subtype: "Ativo cadastrado",
+      subtype: `Ativo cadastrado - ${ASSET_INDEXERS[latestRow.indexer || "CDI"].label}`,
+      indexer: latestRow.indexer || "CDI",
       issuerOrFund: latestRow.issuer,
       paper: "",
       firstSeen: sortedRows[0].date,
@@ -274,7 +313,7 @@ function buildRegisteredPortfolio(rows: RegisteredAssetRow[]) {
       pnlGross: latestRow.liquidValue - latestRow.appliedValue,
       pnlMin: Math.min(...pnls),
       pnlMax: Math.max(...pnls),
-      qualityNote: "Ativo cadastrado manualmente ou via planilha. P&L calculado como Valor Liquido - Valor Aplicado.",
+      qualityNote: `Ativo cadastrado manualmente ou via planilha. P&L calculado como Valor Líquido - Valor Aplicado. Indexador informado: ${ASSET_INDEXERS[latestRow.indexer || "CDI"].label}.`,
     });
 
     history[assetId] = points;
@@ -285,8 +324,8 @@ function buildRegisteredPortfolio(rows: RegisteredAssetRow[]) {
 
 function downloadSpreadsheetTemplate() {
   const csv = [
-    "Codigo;Emitente;Valor Aplicado;Valor Liquido;Data",
-    "C285318;Banco Exemplo;100000,00;104250,50;2026-09-27",
+    "Código;Emitente;Indexador;Valor Aplicado;Valor Líquido;Data",
+    "C285318;Banco Exemplo;CDI;100000,00;104250,50;2026-09-27",
   ].join("\n");
 
   downloadCsvFile("modelo-cadastro-ativos.csv", csv);
@@ -344,6 +383,73 @@ function largestMove(history: HistoryPoint[], direction: "gain" | "loss") {
         ? current
         : best;
   }, values[0]);
+}
+
+type BenchmarkRateState = {
+  IPCA: OfficialMonthlyInflationRate[];
+  INPC: OfficialMonthlyInflationRate[];
+  CDI: OfficialMonthlyCdiRate[];
+};
+
+const EMPTY_BENCHMARK_RATES: BenchmarkRateState = {
+  IPCA: [],
+  INPC: [],
+  CDI: [],
+};
+
+const BENCHMARK_COLORS = {
+  CDI: "#74783f",
+  IPCA: "#9b5f47",
+  INPC: "#a98245",
+} as const;
+
+function monthKey(date: string) {
+  return date.slice(0, 7);
+}
+
+function buildMonthlyBenchmark(
+  label: "CDI" | "IPCA" | "INPC",
+  history: HistoryPoint[],
+  rates: Array<OfficialMonthlyCdiRate | OfficialMonthlyInflationRate>,
+  color: string,
+): BenchmarkSeries | null {
+  const firstPoint = history[0];
+  const baseValue = firstPoint?.appliedValue;
+
+  if (!firstPoint || baseValue == null || baseValue <= 0 || rates.length === 0) {
+    return null;
+  }
+
+  const sortedRates = [...rates].sort((a, b) => a.isoMonth.localeCompare(b.isoMonth));
+  const startMonth = monthKey(firstPoint.date);
+  const points = history.map((point) => {
+    const currentMonth = monthKey(point.date);
+    const factor = sortedRates
+      .filter((rate) => rate.isoMonth > startMonth && rate.isoMonth <= currentMonth)
+      .reduce((current, rate) => current * (1 + rate.monthlyRatePercent / 100), 1);
+
+    return {
+      date: point.date,
+      value: baseValue * factor - baseValue,
+    };
+  });
+
+  return {
+    id: label.toLowerCase(),
+    label,
+    color,
+    points,
+  };
+}
+
+function buildBenchmarkSeries(history: HistoryPoint[], rates: BenchmarkRateState) {
+  const benchmarks = [
+    buildMonthlyBenchmark("CDI", history, rates.CDI, BENCHMARK_COLORS.CDI),
+    buildMonthlyBenchmark("IPCA", history, rates.IPCA, BENCHMARK_COLORS.IPCA),
+    buildMonthlyBenchmark("INPC", history, rates.INPC, BENCHMARK_COLORS.INPC),
+  ];
+
+  return benchmarks.filter((series): series is BenchmarkSeries => series != null);
 }
 
 function StatCard({
@@ -456,7 +562,7 @@ function PeriodControl({
             value={startDate}
             onChange={(event) => setStartDate(event.target.value)}
           />
-          <span>ate</span>
+          <span>até</span>
           <input
             aria-label="Data final"
             type="date"
@@ -506,13 +612,13 @@ function AssetRegistrationPanel({
         <div className="panel-header">
           <div>
             <h2>Novo ativo</h2>
-            <p>Cadastre um ativo individual para acompanhar valor aplicado, valor liquido e historico.</p>
+            <p>Cadastre um ativo individual para acompanhar valor aplicado, valor líquido e histórico.</p>
           </div>
         </div>
 
         <div className="registration-form">
           <label>
-            <span>Codigo</span>
+            <span>Código</span>
             <input
               value={form.code}
               onChange={(event) => setForm({ ...form, code: event.target.value })}
@@ -528,6 +634,19 @@ function AssetRegistrationPanel({
             />
           </label>
           <label>
+            <span>Indexador</span>
+            <select
+              value={form.indexer}
+              onChange={(event) => setForm({ ...form, indexer: event.target.value as AssetIndexerKind })}
+            >
+              {indexerOptions.map((indexer) => (
+                <option key={indexer.kind} value={indexer.kind}>
+                  {indexer.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
             <span>Valor aplicado</span>
             <input
               inputMode="decimal"
@@ -537,7 +656,7 @@ function AssetRegistrationPanel({
             />
           </label>
           <label>
-            <span>Valor liquido</span>
+            <span>Valor líquido</span>
             <input
               inputMode="decimal"
               value={form.liquidValue}
@@ -564,7 +683,7 @@ function AssetRegistrationPanel({
         <div className="panel-header">
           <div>
             <h2>Entrada por planilha</h2>
-            <p>Modelo aceito: Codigo, Emitente, Valor Aplicado, Valor Liquido, Data.</p>
+            <p>Modelo aceito: Código, Emitente, Indexador, Valor Aplicado, Valor Líquido, Data.</p>
           </div>
           <div className="template-actions">
             <button className="secondary-action" type="button" onClick={downloadSpreadsheetTemplate}>
@@ -593,7 +712,7 @@ function AssetRegistrationPanel({
           <textarea
             value={importText}
             onChange={(event) => setImportText(event.target.value)}
-            placeholder={"Codigo;Emitente;Valor Aplicado;Valor Liquido;Data\nC285318;Banco Exemplo;100000,00;104250,50;2026-09-27"}
+            placeholder={"Código;Emitente;Indexador;Valor Aplicado;Valor Líquido;Data\nC285318;Banco Exemplo;CDI;100000,00;104250,50;2026-09-27"}
           />
           <div className="import-actions">
             <button className="secondary-action" type="button" onClick={onImport}>
@@ -614,9 +733,9 @@ function AssetRegistrationPanel({
 
       <article className="panel registered-summary-panel">
         <div className="asset-table-summary">
-          <StatCard icon={Layers3} label="Ativos cadastrados" value={uniqueCodes.toLocaleString("pt-BR")} hint="Codigos unicos" />
+          <StatCard icon={Layers3} label="Ativos cadastrados" value={uniqueCodes.toLocaleString("pt-BR")} hint="Códigos únicos" />
           <StatCard icon={WalletCards} label="Valor aplicado" value={money(totalApplied)} hint="Soma cadastrada" />
-          <StatCard icon={CircleDollarSign} label="Valor liquido" value={money(totalLiquid)} hint="Soma cadastrada" />
+          <StatCard icon={CircleDollarSign} label="Valor líquido" value={money(totalLiquid)} hint="Soma cadastrada" />
         </div>
       </article>
 
@@ -624,7 +743,7 @@ function AssetRegistrationPanel({
         <div className="panel-header">
           <div>
             <h2>Ativos cadastrados</h2>
-            <p>As linhas importadas entram na lista geral, no historico e no grafico do ativo.</p>
+            <p>As linhas importadas entram na lista geral, no histórico e no gráfico do ativo.</p>
           </div>
           <div className="template-actions">
             <button className="secondary-action" type="button" onClick={onExportRows} disabled={registeredRows.length === 0}>
@@ -642,11 +761,12 @@ function AssetRegistrationPanel({
           <table>
             <thead>
               <tr>
-                <th>Codigo</th>
+                <th>Código</th>
                 <th>Emitente</th>
+                <th>Indexador</th>
                 <th>Origem</th>
                 <th>Valor aplicado</th>
-                <th>Valor liquido</th>
+                <th>Valor líquido</th>
                 <th>Data</th>
                 <th></th>
               </tr>
@@ -658,6 +778,7 @@ function AssetRegistrationPanel({
                     <strong>{row.code}</strong>
                   </td>
                   <td>{row.issuer}</td>
+                  <td>{ASSET_INDEXERS[row.indexer || "CDI"].label}</td>
                   <td>{row.source}</td>
                   <td>{money(row.appliedValue)}</td>
                   <td>{money(row.liquidValue)}</td>
@@ -676,7 +797,7 @@ function AssetRegistrationPanel({
               ))}
               {registeredRows.length === 0 ? (
                 <tr>
-                  <td colSpan={7}>Nenhum ativo cadastrado ainda.</td>
+                  <td colSpan={8}>Nenhum ativo cadastrado ainda.</td>
                 </tr>
               ) : null}
             </tbody>
@@ -690,7 +811,7 @@ function AssetRegistrationPanel({
 function App() {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("Todos");
-  const [selectedId, setSelectedId] = useState("RF|C285318");
+  const [selectedId, setSelectedId] = useState("DEMO|PRE13-2025");
   const [activeTab, setActiveTab] = useState<NavLabel>("Vida dos Ativos");
   const [periodMode, setPeriodMode] = useState("Vida completa");
   const [startDate, setStartDate] = useState("");
@@ -699,10 +820,29 @@ function App() {
   const [registeredRows, setRegisteredRows] = useState<RegisteredAssetRow[]>(loadRegisteredRows);
   const [importText, setImportText] = useState("");
   const [importErrors, setImportErrors] = useState<string[]>([]);
+  const [benchmarkRates, setBenchmarkRates] = useState<BenchmarkRateState>(EMPTY_BENCHMARK_RATES);
 
   useEffect(() => {
     saveRegisteredRows(registeredRows);
   }, [registeredRows]);
+
+  useEffect(() => {
+    let active = true;
+
+    Promise.all([
+      fetchBcbMonthlyCdi(600).catch(() => []),
+      fetchIbgeMonthlyInflation("IPCA", "-600").catch(() => []),
+      fetchIbgeMonthlyInflation("INPC", "-600").catch(() => []),
+    ]).then(([CDI, IPCA, INPC]) => {
+      if (active) {
+        setBenchmarkRates((current) => ({ ...current, CDI, IPCA, INPC }));
+      }
+    });
+
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const registeredPortfolio = useMemo(() => buildRegisteredPortfolio(registeredRows), [registeredRows]);
   const allAssets = useMemo(
@@ -722,6 +862,11 @@ function App() {
   const periodHistory = useMemo(
     () => filterHistoryByDate(selectedHistory, periodMode, startDate, endDate),
     [selectedHistory, periodMode, startDate, endDate],
+  );
+
+  const benchmarkSeries = useMemo(
+    () => buildBenchmarkSeries(periodHistory, benchmarkRates),
+    [periodHistory, benchmarkRates],
   );
   const latestPoint = periodHistory[periodHistory.length - 1];
   const firstPoint = periodHistory[0];
@@ -744,27 +889,27 @@ function App() {
       ? "Lista de Ativos"
       : activeTab === "Cadastro de Ativos"
         ? "Cadastro de Ativos"
-      : activeTab === "Historico"
-        ? "Historico do Ativo"
-        : activeTab === "Configuracoes"
-          ? "Configuracoes"
+      : activeTab === "Histórico"
+        ? "Histórico do Ativo"
+        : activeTab === "Configurações"
+          ? "Configurações"
           : "Vida dos Ativos";
   const tabDescription =
     activeTab === "Lista de Ativos"
-      ? "Visao geral dos ativos com valor aplicado e valor atual da carteira."
+      ? "Visão geral dos ativos com valor aplicado e valor atual da carteira."
       : activeTab === "Cadastro de Ativos"
         ? "Cadastre ativos manualmente ou importe uma planilha no modelo definido."
-      : activeTab === "Historico"
-        ? "Registros diarios do ativo selecionado dentro do periodo escolhido."
-        : activeTab === "Configuracoes"
-          ? "Preferencias visuais e filtros padrao."
+      : activeTab === "Histórico"
+        ? "Registros diários do ativo selecionado dentro do período escolhido."
+        : activeTab === "Configurações"
+          ? "Preferências visuais e filtros padrão."
           : "Selecione um ativo para enxergar seu ciclo, seus piores momentos e seus melhores ganhos.";
 
   const handleManualSubmit = () => {
-    const result = createRegisteredRow(assetForm, "Formulario");
+    const result = createRegisteredRow(assetForm, "Formulário");
 
     if (!result.row) {
-      setImportErrors([result.error || "Nao foi possivel cadastrar o ativo."]);
+      setImportErrors([result.error || "Não foi possível cadastrar o ativo."]);
       return;
     }
 
@@ -792,20 +937,20 @@ function App() {
     const reader = new FileReader();
 
     reader.onload = () => handleImportRows(String(reader.result || ""));
-    reader.onerror = () => setImportErrors(["Nao foi possivel ler o arquivo selecionado."]);
+    reader.onerror = () => setImportErrors(["Não foi possível ler o arquivo selecionado."]);
     reader.readAsText(file);
   };
 
   return (
     <div className="asset-shell">
-      <aside className="sidebar">
+      <header className="topbar">
         <div className="brand">
           <div className="brand-mark">
             <LineChart size={25} />
           </div>
           <div>
             <strong>Vida dos Ativos</strong>
-            <span>Historico. Valor. Carteira.</span>
+            <span>Histórico. Valor. Carteira.</span>
           </div>
         </div>
 
@@ -823,7 +968,7 @@ function App() {
           ))}
         </nav>
 
-      </aside>
+      </header>
 
       <main className="asset-main">
         <header className="asset-header">
@@ -890,7 +1035,7 @@ function App() {
                     icon={WalletCards}
                     label="Valor aplicado"
                     value={money(assetAppliedValue(selectedAsset))}
-                    hint={`${selectedAsset.observations.toLocaleString("pt-BR")} observacoes`}
+                    hint={`${selectedAsset.observations.toLocaleString("pt-BR")} observações`}
                   />
                   <StatCard
                     icon={CircleDollarSign}
@@ -903,14 +1048,14 @@ function App() {
                     icon={TrendingUp}
                     label="Maior ganho registrado"
                     value={money(maxGainPoint?.pnlGross)}
-                    hint={maxGainPoint ? formatDate(maxGainPoint.date) : "Sem historico"}
+                    hint={maxGainPoint ? formatDate(maxGainPoint.date) : "Sem histórico"}
                   />
                   <StatCard
                     className="negative"
                     icon={TrendingDown}
                     label="Maior perda registrada"
                     value={money(maxLossPoint?.pnlGross)}
-                    hint={maxLossPoint ? formatDate(maxLossPoint.date) : "Sem historico"}
+                    hint={maxLossPoint ? formatDate(maxLossPoint.date) : "Sem histórico"}
                   />
                 </div>
 
@@ -918,16 +1063,16 @@ function App() {
                   <div className="panel-header">
                     <div>
                       <h2>Ciclo de vida do P&L</h2>
-                      <p>Resultado bruto em reais no periodo selecionado.</p>
+                      <p>Resultado bruto em reais no período selecionado.</p>
                     </div>
                     <div className="date-range">
                       <span>{periodStartLabel}</span>
-                      <strong>ate</strong>
+                      <strong>até</strong>
                       <span>{periodEndLabel}</span>
                     </div>
                   </div>
 
-                  <PnlChart data={periodHistory} />
+                  <PnlChart data={periodHistory} comparisonSeries={benchmarkSeries} />
                 </article>
               </section>
 
@@ -935,7 +1080,7 @@ function App() {
                 <div className="panel-header compact">
                   <div>
                     <h2>Raio-x do Ativo</h2>
-                    <p>Onde ele ganhou e onde ele perdeu no periodo.</p>
+                    <p>Onde ele ganhou e onde ele perdeu no período.</p>
                   </div>
                 </div>
 
@@ -953,13 +1098,13 @@ function App() {
                   </div>
 
                   <div className="insight-card">
-                    <span>Maior melhora diaria</span>
+                    <span>Maior melhora diária</span>
                     <strong className="positive">{money(bestMovePoint?.pnlChange)}</strong>
                     <small>{bestMovePoint ? formatDate(bestMovePoint.date) : "Sem registro"}</small>
                   </div>
 
                   <div className="insight-card">
-                    <span>Maior queda diaria</span>
+                    <span>Maior queda diária</span>
                     <strong className="negative">{money(worstMovePoint?.pnlChange)}</strong>
                     <small>{worstMovePoint ? formatDate(worstMovePoint.date) : "Sem registro"}</small>
                   </div>
@@ -977,7 +1122,7 @@ function App() {
                 <div className="panel-header">
                   <div>
                     <h2>Linha do tempo do ativo</h2>
-                    <p>Ultimos registros diarios do periodo selecionado.</p>
+                    <p>Últimos registros diários do período selecionado.</p>
                   </div>
                   <span>{periodHistory.length.toLocaleString("pt-BR")} pontos</span>
                 </div>
@@ -992,7 +1137,7 @@ function App() {
                         <th>Valor bruto</th>
                         <th>Resgate</th>
                         <th>P&L bruto</th>
-                        <th>Variacao</th>
+                        <th>Variação</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1076,7 +1221,7 @@ function App() {
                       <th>Status</th>
                       <th>Valor aplicado</th>
                       <th>Valor atual da carteira</th>
-                      <th>Ultima posicao</th>
+                      <th>Última posição</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1125,14 +1270,14 @@ function App() {
           />
         ) : null}
 
-        {activeTab === "Historico" ? (
+        {activeTab === "Histórico" ? (
           <section className="history-grid single-history">
             <article className="panel history-panel">
               <div className="panel-header">
                 <div>
                   <h2>{selectedAsset.code}</h2>
                   <p>
-                    {periodHistory.length.toLocaleString("pt-BR")} registros de {periodStartLabel} ate {periodEndLabel}.
+                    {periodHistory.length.toLocaleString("pt-BR")} registros de {periodStartLabel} até {periodEndLabel}.
                   </p>
                 </div>
                 <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
@@ -1169,7 +1314,7 @@ function App() {
                       <th>Valor bruto</th>
                       <th>Resgate</th>
                       <th>P&L bruto</th>
-                      <th>Variacao</th>
+                      <th>Variação</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1191,13 +1336,13 @@ function App() {
           </section>
         ) : null}
 
-        {activeTab === "Configuracoes" ? (
+        {activeTab === "Configurações" ? (
           <section className="settings-grid">
             <article className="panel settings-panel">
               <div className="panel-header">
                 <div>
-                  <h2>Filtros padrao</h2>
-                  <p>Ajuste a visao inicial da carteira.</p>
+                  <h2>Filtros padrão</h2>
+                  <p>Ajuste a visão inicial da carteira.</p>
                 </div>
               </div>
               <div className="settings-controls">
@@ -1210,7 +1355,7 @@ function App() {
                   </select>
                 </label>
                 <label>
-                  <span>Periodo</span>
+                  <span>Período</span>
                   <select value={periodMode} onChange={(event) => setPeriodMode(event.target.value)}>
                     <option>Vida completa</option>
                     <option>Intervalo</option>

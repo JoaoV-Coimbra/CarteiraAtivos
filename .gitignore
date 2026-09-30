@@ -6,3 +6,19 @@ vite-*.log
 
 .env
 .env.*
+*.local
+
+# Chaves e certificados locais
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Bases, planilhas e exportações locais de carteira
+*.csv
+*.tsv
+*.xls
+*.xlsx
+
+# Legado local com dados reais de carteira; o app atual usa src/PortfolioApp.tsx.
+src/app.ts

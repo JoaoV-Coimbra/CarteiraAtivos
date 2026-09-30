@@ -44,18 +44,18 @@ export const cleanText = (value?: string | null) => {
   }
 
   return text
-    .replaceAll("â€”", "—")
-    .replaceAll("Â·", "·")
-    .replaceAll("Ãº", "ú")
-    .replaceAll("Ãš", "Ú")
-    .replaceAll("Ã©", "é")
-    .replaceAll("Ã£", "ã")
-    .replaceAll("Ã§", "ç")
-    .replaceAll("Ãµ", "õ")
-    .replaceAll("Ã¡", "á")
-    .replaceAll("Ã³", "ó")
-    .replaceAll("Ãª", "ê")
-    .replaceAll("Ã­", "í");
+    .replaceAll("Ã¢â‚¬â€", "—")
+    .replaceAll("Ã‚Â·", "·")
+    .replaceAll("ÃƒÂº", "ú")
+    .replaceAll("ÃƒÅ¡", "Ú")
+    .replaceAll("ÃƒÂ©", "é")
+    .replaceAll("ÃƒÂ£", "ã")
+    .replaceAll("ÃƒÂ§", "ç")
+    .replaceAll("ÃƒÂµ", "õ")
+    .replaceAll("ÃƒÂ¡", "á")
+    .replaceAll("ÃƒÂ³", "ó")
+    .replaceAll("ÃƒÂª", "ê")
+    .replaceAll("ÃƒÂ­", "í");
 };
 
 export const assetLabel = (asset: AssetSummary) =>

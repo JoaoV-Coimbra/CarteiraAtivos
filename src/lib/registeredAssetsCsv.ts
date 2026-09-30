@@ -1,11 +1,14 @@
+import type { AssetIndexerKind } from "./indexers";
+
 export type RegisteredAssetRow = {
   id: string;
   code: string;
   issuer: string;
+  indexer?: AssetIndexerKind | null;
   appliedValue: number;
   liquidValue: number;
   date: string;
-  source: "Formulario" | "Planilha";
+  source: "Formulário" | "Planilha";
   createdAt: string;
 };
 
@@ -14,10 +17,11 @@ const LEGACY_REGISTERED_ASSETS_JSON_STORAGE_KEY = "projeto-arvore.registered-ass
 
 const REGISTERED_ASSETS_HEADERS = [
   "Id",
-  "Codigo",
+  "Código",
   "Emitente",
+  "Indexador",
   "Valor Aplicado",
-  "Valor Liquido",
+  "Valor Líquido",
   "Data",
   "Origem",
   "Criado Em",
@@ -96,6 +100,28 @@ function csvNumberToNumber(value: string) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function normalizeIndexer(value: string): AssetIndexerKind | null {
+  const normalized = normalizeHeader(value);
+
+  if (normalized === "cdi") {
+    return "CDI";
+  }
+
+  if (normalized === "ipca") {
+    return "IPCA";
+  }
+
+  if (normalized === "inpc") {
+    return "INPC";
+  }
+
+  if (["prefixado", "prefixada", "pre", "prefixed"].includes(normalized)) {
+    return "PREFIXED";
+  }
+
+  return null;
+}
+
 export function registeredRowsToCsv(rows: RegisteredAssetRow[]) {
   const lines = [
     REGISTERED_ASSETS_HEADERS.map(csvEscape).join(";"),
@@ -104,6 +130,7 @@ export function registeredRowsToCsv(rows: RegisteredAssetRow[]) {
         row.id,
         row.code,
         row.issuer,
+        row.indexer || "",
         numberToCsv(row.appliedValue),
         numberToCsv(row.liquidValue),
         row.date,
@@ -134,6 +161,7 @@ export function registeredRowsFromCsv(csv: string) {
     id: headers.findIndex((header) => header === "id"),
     code: headers.findIndex((header) => ["codigo", "code"].includes(header)),
     issuer: headers.findIndex((header) => ["emitente", "emissor", "issuer"].includes(header)),
+    indexer: headers.findIndex((header) => ["indexador", "indexer"].includes(header)),
     appliedValue: headers.findIndex((header) => ["valoraplicado", "aplicado", "valorinvestido"].includes(header)),
     liquidValue: headers.findIndex((header) => ["valorliquido", "liquido", "valoratual", "valorbruto"].includes(header)),
     date: headers.findIndex((header) => ["data", "date"].includes(header)),
@@ -149,6 +177,7 @@ export function registeredRowsFromCsv(csv: string) {
     const cells = splitDelimitedLine(line, delimiter);
     const code = (cells[index.code] || "").trim().toUpperCase();
     const issuer = (cells[index.issuer] || "").trim();
+    const indexer = index.indexer >= 0 ? normalizeIndexer(cells[index.indexer] || "") : null;
     const appliedValue = csvNumberToNumber(cells[index.appliedValue] || "");
     const liquidValue = csvNumberToNumber(cells[index.liquidValue] || "");
     const date = (cells[index.date] || "").trim();
@@ -162,17 +191,18 @@ export function registeredRowsFromCsv(csv: string) {
         id: cells[index.id] || `${code}-${date}-${crypto.randomUUID()}`,
         code,
         issuer,
+        indexer,
         appliedValue,
         liquidValue,
         date,
-        source: cells[index.source] === "Planilha" ? "Planilha" : "Formulario",
+        source: cells[index.source] === "Planilha" ? "Planilha" : "Formulário",
         createdAt: cells[index.createdAt] || new Date().toISOString(),
       } satisfies RegisteredAssetRow,
     ];
   });
 }
 
-export function loadRegisteredRows() {
+export function loadRegisteredRows(): RegisteredAssetRow[] {
   const csv = localStorage.getItem(REGISTERED_ASSETS_CSV_STORAGE_KEY);
 
   if (csv) {
@@ -183,7 +213,12 @@ export function loadRegisteredRows() {
     const legacyJson = localStorage.getItem(LEGACY_REGISTERED_ASSETS_JSON_STORAGE_KEY);
     const parsed = legacyJson ? (JSON.parse(legacyJson) as RegisteredAssetRow[]) : [];
 
-    return Array.isArray(parsed) ? parsed : [];
+    return Array.isArray(parsed)
+      ? parsed.map((row) => ({
+          ...row,
+          source: row.source === "Planilha" ? "Planilha" : "Formulário",
+        }))
+      : [];
   } catch {
     return [];
   }
